@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>IELTS Speaking Examiner</title>
+<!-- Tailwind CDN -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- React + Babel -->
+<script src="https://unpkg.com/react@17/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+</head>
+<body class="bg-gray-100">
+<div id="root" class="p-4"></div>
+
+<script type="text/babel">
+function App() {
+  const [topics, setTopics] = React.useState([
+    { title: "Topic 1", questions: ["What is your name?", "Where are you from?"], current: 0 },
+    { title: "Topic 2", questions: ["Describe your hometown.", "What do you like about it?"], current: 0 },
+    { title: "Topic 3", questions: ["What are your future plans?", "Why?"], current: 0 }
+  ]);
+  const [currentTopicIndex, setCurrentTopicIndex] = React.useState(0);
+  const [recording, setRecording] = React.useState(false);
+  const [mediaRecorder, setMediaRecorder] = React.useState(null);
+  const [audioURL, setAudioURL] = React.useState(null);
+  const [score, setScore] = React.useState(null);
+
+  const currentTopic = topics[currentTopicIndex];
+
+  const nextQuestion = () => {
+    setTopics(t => {
+      const newT = [...t];
+      if (newT[currentTopicIndex].current < newT[currentTopicIndex].questions.length - 1) {
+        newT[currentTopicIndex].current += 1;
+      }
+      return newT;
+    });
+  };
+
+  const prevQuestion = () => {
+    setTopics(t => {
+      const newT = [...t];
+      if (newT[currentTopicIndex].current > 0) {
+        newT[currentTopicIndex].current -= 1;
+      }
+      return newT;
+    });
+  };
+
+  const startRecording = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const recorder = new MediaRecorder(stream);
+    const chunks = [];
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: "audio/webm" });
+      const url = URL.createObjectURL(blob);
+      setAudioURL(url);
+      // Simple scoring simulation
+      setScore({
+        fluency: Math.floor(Math.random() * 3) + 6,
+        lexical: Math.floor(Math.random() * 3) + 6,
+        grammar: Math.floor(Math.random() * 3) + 6,
+        pronunciation: Math.floor(Math.random() * 3) + 6
+      });
+    };
+    recorder.start();
+    setMediaRecorder(recorder);
+    setRecording(true);
+  };
+
+  const stopRecording = () => {
+    mediaRecorder.stop();
+    setRecording(false);
+  };
+
+  return (
+    <div className="max-w-lg mx-auto bg-white p-4 rounded shadow">
+      <h1 className="text-2xl font-bold mb-4">IELTS Speaking Examiner</h1>
+
+      <div className="mb-4">
+        <h2 className="font-semibold">{currentTopic.title}</h2>
+        <p className="mb-2">{currentTopic.questions[currentTopic.current]}</p>
+        <div className="flex gap-2">
+          <button onClick={prevQuestion} className="px-3 py-1 bg-gray-300 rounded">◀</button>
+          <button onClick={nextQuestion} className="px-3 py-1 bg-gray-300 rounded">▶</button>
+        </div>
+      </div>
+
+      <div className="mb-4">
+        {recording ? (
+          <button onClick={stopRecording} className="px-4 py-2 bg-red-500 text-white rounded">Stop & Score</button>
+        ) : (
+          <button onClick={startRecording} className="px-4 py-2 bg-green-500 text-white rounded">Record Answer</button>
+        )}
+      </div>
+
+      {audioURL && (
+        <div className="mb-4">
+          <audio controls src={audioURL}></audio>
+        </div>
+      )}
+
+      {score && (
+        <div>
+          <h3 className="font-semibold mb-2">Scores (approx.):</h3>
+          <ul className="list-disc list-inside">
+            <li>Fluency & Coherence: {score.fluency}</li>
+            <li>Lexical Resource: {score.lexical}</li>
+            <li>Grammatical Range & Accuracy: {score.grammar}</li>
+            <li>Pronunciation: {score.pronunciation}</li>
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.render(<App />, document.getElementById("root"));
+</script>
+</body>
+</html>
