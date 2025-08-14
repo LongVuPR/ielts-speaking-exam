@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IELTS Speaking Examiner (Client‑only)</title>
+  <meta name="theme-color" content="#10b981" />
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 + Babel -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html, body { height: 100%; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  </style>
+</head>
+<body class="bg-gradient-to-b from-slate-50 to-white text-slate-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ===== Helper utilities =====
+    const uid = () => Math.random().toString(36).slice(2);
+
+    const defaultTopics = [
+      {
+        id: uid(),
+        title: "Part 1 – Everyday Life",
+        questions: [
+          { id: uid(), text: "Tell me about your hometown. What do you like about it?" },
+          { id: uid(), text: "Do you prefer mornings or evenings? Why?" },
+          { id: uid(), text: "What kind of music do you usually listen to?" },
+        ],
+      },
+      {
+        id: uid(),
+        title: "Part 2 – Long Turn (Cue Card)",
+        questions: [
+          { id: uid(), text: "Describe a book that influenced you. You should say what it is about and why it influenced you." },
+        ],
+      },
+      {
+        id: uid(),
+        title: "Part 3 – Discussion",
+        questions: [
+          { id: uid(), text: "How has technology changed the way we read?" },
+          { id: uid(), text: "Do you think physical books will disappear?" },
+        ],
+      },
+    ];
+
+    const saveLS = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch(e){} };
+    const loadLS = (key, fallback) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch(e){ return fallback; } };
+
+    // ===== Scoring (heuristic, NOT official) =====
+    function analyzeAndScore(transcript, durationSec) {
+      const clean = (transcript || "").toLowerCase().replace(/[^a-zA-Z'\\s]/g, " ");
+      const tokens = clean.trim().split(/\\s+/).filter(Boolean);
+      const totalWords = tokens.length;
+      const uniqueWords = new Set(tokens).size;
+      const typeTokenRatio = totalWords ? uniqueWords / totalWords : 0;
+      const wpm = durationSec ? (totalWords / durationSec) * 60 : 0;
+
+      let pausePenalty = 0;
+      if (wpm < 70) pausePenalty += 0.5;
+      if (wpm < 50) pausePenalty += 1.0;
+      if (wpm > 200) pausePenalty += 0.5;
+
+      const fillerWords = ["um","uh","erm","like","you","know","i","mean","sort","of","kind","of"];
+      const fillerSet = new Set(["um","uh","erm","like","you know","i mean","sort of","kind of"]);
+      const fillerCount = tokens.filter(t => fillerWords.includes(t)).length;
+
+      const sentences = (transcript || "").split(/[.!?]/).map(s=>s.trim()).filter(Boolean);
+      const shortSentences = sentences.filter(s => s.split(/\\s+/).length <= 6).length;
+      const shortRatio = sentences.length ? shortSentences / sentences.length : 1;
+
+      const lexical = clamp(mapRange(typeTokenRatio, 0.2, 0.6, 4.5, 8.5));
+      let fluency = clamp(mapRange(wpm, 70, 160, 5.0, 8.5) - pausePenalty - Math.min(1, fillerCount * 0.05));
+      let grammar = clamp(8.0 - shortRatio * 3 - Math.min(1.5, fillerCount * 0.03));
+      let pronunciation = 6.5; // default; may adjust with recognition confidence later
+
+      const details = [
+        \`Words: \${totalWords}, Unique: \${uniqueWords} (TTR \${(typeTokenRatio*100).toFixed(1)}%)\`,
+        \`WPM: \${wpm.toFixed(0)} – filler: \${fillerCount}, short-sentence ratio: \${(shortRatio*100).toFixed(0)}%\`,
+      ];
+
+      const scores = {
+        fluency: roundHalf(fluency),
+        lexical: roundHalf(lexical),
+        grammar: roundHalf(grammar),
+        pronunciation: roundHalf(pronunciation),
+        overall: 0,
+        details: details.join(" | "),
+      };
+      scores.overall = roundHalf((scores.fluency + scores.lexical + scores.grammar + scores.pronunciation) / 4);
+      return scores;
+    }
+
+    function adjustPronunciationWithConfidence(scores, conf) {
+      if (typeof conf === "number") {
+        const adj = clamp(mapRange(conf, 0.6, 0.95, 5.5, 8.5));
+        scores.pronunciation = roundHalf(adj);
+        scores.overall = roundHalf((scores.fluency + scores.lexical + scores.grammar + scores.pronunciation) / 4);
+      }
+    }
+
+    function mapRange(v, inMin, inMax, outMin, outMax) {
+      const x = Math.min(Math.max(v, inMin), inMax);
+      const t = (x - inMin) / (inMax - inMin || 1);
+      return outMin + t * (outMax - outMin);
+    }
+    function clamp(n, lo = 0, hi = 9) { return Math.min(Math.max(n, lo), hi); }
+    function roundHalf(n) { return Math.round(n * 2) / 2; }
+
+    // ===== Recorder hook =====
+    function useRecorder() {
+      const mediaRecorderRef = React.useRef(null);
+      const [isRecording, setRecording] = React.useState(false);
+      const [permission, setPermission] = React.useState("unknown"); // 'unknown'|'granted'|'denied'
+      const chunksRef = React.useRef([]);
+
+      const request = async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          setPermission("granted");
+          const mr = new MediaRecorder(stream);
+          mediaRecorderRef.current = mr;
+        } catch (e) {
+          console.error(e);
+          setPermission("denied");
+        }
+      };
+
+      const start = async () => {
+        if (!mediaRecorderRef.current) await request();
+        const mr = mediaRecorderRef.current;
+        if (!mr) return;
+        chunksRef.current = [];
+        mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+        mr.start();
+        setRecording(true);
+      };
+
+      const stop = () => new Promise((resolve) => {
+        const mr = mediaRecorderRef.current;
+        if (!mr) return resolve(new Blob());
+        mr.onstop = () => {
+          const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+          resolve(blob);
+          setRecording(false);
+        };
+        mr.stop();
+      });
+
+      return { request, start, stop, isRecording, permission };
+    }
+
+    // ===== Speech Recognition (optional) =====
+    const getRec = () => {
+      const SR = window.webkitSpeechRecognition || window.SpeechRecognition;
+      if (!SR) return null;
+      const rec = new SR();
+      rec.lang = "en-US";
+      rec.interimResults = true;
+      rec.continuous = true;
+      return rec;
+    };
+
+    // ===== App =====
+    function App() {
+      const [topics, setTopics] = React.useState(() => loadLS("ielts_topics", defaultTopics));
+      const [currentTopicIndex, setCurrentTopicIndex] = React.useState(0);
+      const [currentQuestionIndex, setCurrentQuestionIndex] = React.useState(0);
+      const [attempts, setAttempts] = React.useState(() => loadLS("ielts_attempts", []));
+      const [autoTranscribe, setAutoTranscribe] = React.useState(true);
+      const [recTrans, setRecTrans] = React.useState("");
+      const [recConf, setRecConf] = React.useState(undefined);
+
+      const { request, start, stop, isRecording, permission } = useRecorder();
+      const recRef = React.useRef(null);
+      const currentTopic = topics[currentTopicIndex];
+      const currentQuestion = currentTopic?.questions[currentQuestionIndex];
+
+      React.useEffect(() => { saveLS("ielts_topics", topics); }, [topics]);
+      React.useEffect(() => { saveLS("ielts_attempts", attempts); }, [attempts]);
+
+      React.useEffect(() => {
+        if (!autoTranscribe) return;
+        recRef.current = getRec();
+        return () => { try { recRef.current && recRef.current.stop(); } catch(e){} };
+      }, [autoTranscribe]);
+
+      const startExam = async () => {
+        setRecTrans("");
+        setRecConf(undefined);
+        if (autoTranscribe && recRef.current) {
+          const r = recRef.current;
+          r.onresult = (e) => {
+            let finalText = "";
+            let confidence = 0; let count = 0;
+            for (let i = e.resultIndex; i < e.results.length; i++) {
+              const res = e.results[i];
+              if (res.isFinal) {
+                finalText += res[0].transcript + " ";
+                confidence += res[0].confidence; count++;
+              }
+            }
+            if (finalText) setRecTrans(prev => (prev + " " + finalText).trim());
+            if (count) setRecConf(confidence / count);
+          };
+          try { r.start(); } catch(e){}
+        }
+        await start();
+        const attempt = {
+          id: uid(),
+          topicId: currentTopic.id,
+          questionId: currentQuestion.id,
+          startedAt: Date.now(),
+        };
+        setAttempts(prev => [attempt, ...prev]);
+      };
+
+      const stopExam = async () => {
+        const blob = await stop();
+        try { recRef.current && recRef.current.stop(); } catch(e){}
+        const url = URL.createObjectURL(blob);
+        setAttempts(prev => {
+          const [last, ...rest] = prev;
+          if (!last) return prev;
+          const durationSec = (Date.now() - last.startedAt) / 1000;
+          const transcript = recTrans.trim();
+          const scores = analyzeAndScore(transcript, durationSec);
+          adjustPronunciationWithConfidence(scores, recConf);
+          const metrics = { durationSec, wpm: transcript ? (transcript.split(/\\s+/).length / durationSec) * 60 : undefined, recConf };
+          const updated = { ...last, endedAt: Date.now(), audioUrl: url, transcript, metrics, scores };
+          return [updated, ...rest];
+        });
+      };
+
+      const nextQuestion = () => {
+        if (!currentTopic) return;
+        if (currentQuestionIndex < currentTopic.questions.length - 1) {
+          setCurrentQuestionIndex(i => i + 1);
+        } else if (currentTopicIndex < topics.length - 1) {
+          setCurrentTopicIndex(t => t + 1);
+          setCurrentQuestionIndex(0);
+        }
+      };
+
+      const prevQuestion = () => {
+        if (!currentTopic) return;
+        if (currentQuestionIndex > 0) {
+          setCurrentQuestionIndex(i => i - 1);
+        } else if (currentTopicIndex > 0) {
+          const prevIdx = currentTopicIndex - 1;
+          setCurrentTopicIndex(prevIdx);
+          setCurrentQuestionIndex(Math.max(0, topics[prevIdx].questions.length - 1));
+        }
+      };
+
+      const addTopic = () => setTopics(t => [...t, { id: uid(), title: \`New Topic \${t.length+1}\`, questions: [{ id: uid(), text: "Question 1" }] }]);
+      const removeTopic = (id) => setTopics(t => t.filter(x => x.id !== id));
+
+      const addQuestion = (topicId) => setTopics(t => t.map(tp => tp.id === topicId ? { ...tp, questions: [...tp.questions, { id: uid(), text: \`Question \${tp.questions.length+1}\` }] } : tp));
+      const updateTopicTitle = (topicId, title) => setTopics(t => t.map(tp => tp.id === topicId ? { ...tp, title } : tp));
+      const updateQuestionText = (topicId, qId, text) => setTopics(t => t.map(tp => tp.id === topicId ? { ...tp, questions: tp.questions.map(q => q.id === qId ? { ...q, text } : q) } : tp));
+      const removeQuestion = (topicId, qId) => setTopics(t => t.map(tp => tp.id === topicId ? { ...tp, questions: tp.questions.filter(q => q.id !== qId) } : tp));
+
+      const exportResults = () => {
+        const data = JSON.stringify({ exportedAt: new Date().toISOString(), topics, attempts }, null, 2);
+        const blob = new Blob([data], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "ielts-speaking-results.json"; a.click();
+      };
+
+      const resetAll = () => {
+        if (!confirm("Clear all topics and attempts?")) return;
+        setTopics(defaultTopics);
+        setAttempts([]);
+        setCurrentTopicIndex(0);
+        setCurrentQuestionIndex(0);
+      };
+
+      const mobileSafePadding = "p-4 sm:p-6";
+
+      return (
+        <div className={\`min-h-screen \${mobileSafePadding} space-y-4\`}>
+          <div className="max-w-3xl mx-auto space-y-4">
+            <header className="flex items-center justify-between gap-3">
+              <h1 className="text-2xl font-semibold tracking-tight">IELTS Speaking Examiner (Client‑only)</h1>
+              <div className="flex items-center gap-2">
+                <button onClick={exportResults} className="px-3 py-2 rounded-2xl shadow hover:shadow-md bg-white border">Export</button>
+                <button onClick={resetAll} className="px-3 py-2 rounded-2xl shadow hover:shadow-md bg-white border">Reset</button>
+              </div>
+            </header>
+
+            <section className="grid grid-cols-1 gap-3">
+              <div className="rounded-2xl bg-white shadow p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-slate-600">Topic</p>
+                    <h2 className="text-lg font-medium">{currentTopic?.title || "—"}</h2>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={prevQuestion} className="px-3 py-2 rounded-xl bg-slate-100">◀</button>
+                    <span className="text-sm text-slate-600">{currentTopicIndex+1}/{topics.length} • Q{currentQuestionIndex+1}/{currentTopic?.questions.length || 0}</span>
+                    <button onClick={nextQuestion} className="px-3 py-2 rounded-xl bg-slate-100">▶</button>
+                  </div>
+                </div>
+                <p className="mt-3 text-base">{currentQuestion?.text}</p>
+
+                <div className="mt-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={isRecording ? stopExam : startExam}
+                      className={\`px-4 py-2 rounded-2xl text-white \${isRecording ? "bg-rose-500" : "bg-emerald-600"} shadow hover:shadow-md active:scale-[0.99]\`}
+                    >
+                      {isRecording ? "Stop & Score" : "Record Answer"}
+                    </button>
+                    <span className={\`text-sm \${permission==="denied" ? "text-rose-600" : "text-slate-600"}\`}>
+                      Mic: {permission}
+                    </span>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={autoTranscribe} onChange={e=>setAutoTranscribe(e.target.checked)} />
+                    Auto‑transcribe (beta)
+                  </label>
+                </div>
+
+                {isRecording && (
+                  <div className="mt-3 text-sm text-slate-600">
+                    Recording… Speak naturally. Press <span className="font-medium">Stop & Score</span> when finished.
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-2xl bg-white shadow p-4">
+                <h3 className="text-base font-semibold mb-2">Manage Topics & Questions</h3>
+                <div className="space-y-4">
+                  {topics.map((tp, ti) => (
+                    <div key={tp.id} className={\`rounded-xl border \${ti===currentTopicIndex ? "border-emerald-400" : "border-slate-200"} p-3\`}>
+                      <div className="flex items-center gap-2">
+                        <input value={tp.title} onChange={e=>updateTopicTitle(tp.id, e.target.value)} className="w-full bg-slate-50 rounded-lg px-3 py-2" />
+                        <button onClick={()=>setCurrentTopicIndex(ti)} className="px-2 py-1 rounded-lg bg-slate-100">Go</button>
+                        <button onClick={()=>removeTopic(tp.id)} className="px-2 py-1 rounded-lg bg-slate-100">🗑</button>
+                      </div>
+                      <div className="mt-2 space-y-2">
+                        {tp.questions.map((q) => (
+                          <div key={q.id} className="flex items-center gap-2">
+                            <textarea value={q.text} onChange={e=>updateQuestionText(tp.id, q.id, e.target.value)} className="flex-1 bg-slate-50 rounded-lg px-3 py-2" />
+                            <button onClick={()=>removeQuestion(tp.id, q.id)} className="px-2 py-1 rounded-lg bg-slate-100">✖</button>
+                          </div>
+                        ))}
+                        <button onClick={()=>addQuestion(tp.id)} className="px-3 py-2 rounded-lg bg-slate-100">+ Add question</button>
+                      </div>
+                    </div>
+                  ))}
+                  <button onClick={()=>setTopics(t => [...t, { id: uid(), title: \`New Topic \${t.length+1}\`, questions: [{ id: uid(), text: "Question 1" }] }])} className="px-3 py-2 rounded-xl bg-slate-100 w-full">+ Add topic</button>
+                </div>
+              </div>
+
+              <AttemptsPanel attempts={attempts} />
+              <Rubric />
+            </section>
+
+            <footer className="text-xs text-slate-500 pt-6 pb-12">
+              <p><span className="font-medium">Note:</span> This tool runs entirely in your browser. Scoring is heuristic and <span className="underline decoration-dotted">not official IELTS</span>. For best results, enable Auto‑transcribe on Chrome (desktop/Android) or Safari (iOS) where supported.</p>
+            </footer>
+          </div>
+        </div>
+      );
+    }
+
+    function AttemptsPanel({ attempts }) {
+      return (
+        <div className="rounded-2xl bg-white shadow p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-base font-semibold">Results</h3>
+          </div>
+          {attempts.length === 0 ? (
+            <p className="text-sm text-slate-600 mt-2">Your recordings, transcripts and scores will appear here.</p>
+          ) : (
+            <div className="mt-3 space-y-3">
+              {attempts.map(at => (
+                <div key={at.id} className="rounded-xl border p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm">
+                      <div className="font-medium">{new Date(at.startedAt).toLocaleString()}</div>
+                      <div className="text-slate-600">Duration: {at.metrics?.durationSec ? \`\${at.metrics.durationSec.toFixed(1)}s\` : "—"}</div>
+                    </div>
+                    <div className="text-right text-sm">
+                      {at.scores ? (
+                        <div>
+                          <div>Overall: <span className="font-semibold">{at.scores.overall.toFixed(1)}</span></div>
+                          <div className="text-slate-600">F {at.scores.fluency} · L {at.scores.lexical} · G {at.scores.grammar} · P {at.scores.pronunciation}</div>
+                        </div>
+                      ) : <span className="text-slate-600">Not scored</span>}
+                    </div>
+                  </div>
+                  <div className="mt-2 flex flex-col gap-2">
+                    {at.audioUrl && (<audio controls src={at.audioUrl} className="w-full" />)}
+                    {at.transcript && (
+                      <details className="rounded-lg bg-slate-50 p-3">
+                        <summary className="cursor-pointer text-sm font-medium">Transcript</summary>
+                        <p className="text-sm whitespace-pre-wrap mt-2">{at.transcript}</p>
+                      </details>
+                    )}
+                    {at.scores && (
+                      <details className="rounded-lg bg-emerald-50 p-3">
+                        <summary className="cursor-pointer text-sm font-medium">Score breakdown</summary>
+                        <div className="text-sm mt-2 space-y-1">
+                          <p><b>Fluency & Coherence:</b> {at.scores.fluency}</p>
+                          <p><b>Lexical Resource:</b> {at.scores.lexical}</p>
+                          <p><b>Grammatical Range & Accuracy:</b> {at.scores.grammar}</p>
+                          <p><b>Pronunciation:</b> {at.scores.pronunciation}</p>
+                          <p className="text-slate-700">{at.scores.details}</p>
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function Rubric() {
+      return (
+        <div className="rounded-2xl bg-white shadow p-4">
+          <h3 className="text-base font-semibold">IELTS Speaking rubric (summary)</h3>
+          <ul className="list-disc pl-5 mt-2 text-sm text-slate-700 space-y-1">
+            <li><b>Fluency & Coherence</b>: flow of speech, logical organization, few self-corrections or hesitation.</li>
+            <li><b>Lexical Resource</b>: range of vocabulary, appropriacy, paraphrasing, collocations.</li>
+            <li><b>Grammatical Range & Accuracy</b>: complex structures, few errors, good control.</li>
+            <li><b>Pronunciation</b>: intelligibility, stress, rhythm, intonation; consistent clarity.</li>
+          </ul>
+          <p className="text-xs text-slate-500 mt-2">This app estimates scores heuristically from your transcript & timing. Treat results as guidance, not official bands.</p>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
